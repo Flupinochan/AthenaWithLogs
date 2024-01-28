@@ -1,0 +1,62 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Configure VPC Flow Logs and the destination CloudWatch Logs.
+
+# The following is a configuration manual for saving VPC Flow Logs to CloudWatch Logs.
+# https://docs.aws.amazon.com/ja_jp/vpc/latest/userguide/flow-logs-cwl.html
+
+# Create a stack with the name [vpcflowlog-cloudwatchlogs-stack]
+
+Parameters:
+  VPCID:
+    Type: String
+    Default: 'vpc-xxxxx'
+    AllowedPattern: '^vpc-.+'
+    ConstraintDescription: 'VPC ID must start with "vpc-"'
+
+
+
+Resources:
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogRole.Arn
+      LogGroupName: !Ref CloudWatchLogs
+      LogDestinationType: "cloud-watch-logs"
+      MaxAggregationInterval: 600
+      ResourceId: !Ref VPCID
+      ResourceType: "VPC"
+      Tags:
+        - Key: "Name"
+          Value: "VPCFlowLog-CloudWatchLogs"
+      TrafficType: "ALL"
+
+  CloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "VPCFlowLog-${AWS::StackName}"
+      RetentionInDays: 3
+
+  VPCFlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "VPCFlowLogRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "vpc-flow-logs.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: !Sub "VPCFlowLogPolicy-${AWS::StackName}"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "logs:*"
+                Resource:
+                  - "*"

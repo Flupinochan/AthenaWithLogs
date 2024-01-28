@@ -1,0 +1,237 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Configure settings to search CloudTrail logs stored in S3 using Athena.
+
+# The following describes how to use [Parameterized Queries]
+# https://docs.aws.amazon.com/ja_jp/athena/latest/ug/querying-with-prepared-statements.html
+
+# The following is a configuration manual for Athena.
+# https://docs.aws.amazon.com/ja_jp/athena/latest/ug/cloudtrail-logs.html
+
+# Create a stack with the name [cloudtrail-athena-stack]
+
+Parameters:
+  CloudTrailStackName:
+    Type: String
+    Default: 'cloudtrail-stack'
+
+
+
+Resources:
+  DataCatalog:
+    Type: AWS::Athena::DataCatalog
+    Properties:
+      Name: !Sub "CloudTrail-DataCatalog-${AWS::StackName}"
+      Type: "GLUE"
+      Parameters:
+        catalog-id: !Sub "${AWS::AccountId}"
+
+# The ParameterizedQueries can be checked with the following CLI command.
+# aws athena get-prepared-statement --statement-name example --work-group WorkGroup-cloudtrail-athena-stack | jq -r '{StatementName: .PreparedStatement.StatementName, QueryStatement: .PreparedStatement.QueryStatement, WorkGroupName: .PreparedStatement.WorkGroupName, LastModifiedTime: .PreparedStatement.LastModifiedTime} | .QueryStatement'
+
+# The ParameterizedQueries can be executed with the following SQL.
+# EXECUTE example USING 'arn:aws:iam::AccountID:role/RoleName','2023/01/01','2023/06/01'
+  ParameterizedQueries:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      StatementName: "example"
+      WorkGroup: !Ref WorkGroup
+      QueryStatement: !Sub |
+        SELECT
+            userIdentity.arn AS IAM_USER_ARN,
+            MIN(json_extract_scalar(requestParameters, '$.roleArn')) AS ASSUME_ROLE_ARN,
+            COUNT(*) AS TOTAL
+        FROM "${Table}"
+        WHERE json_extract_scalar(requestParameters, '$.roleArn') = ?
+        AND date BETWEEN ? AND ?
+        AND eventName = 'AssumeRole'
+        GROUP BY userIdentity.arn
+
+  WorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "WorkGroup-${AWS::StackName}"
+      RecursiveDeleteOption: True
+      State: "ENABLED"
+      WorkGroupConfiguration:
+        BytesScannedCutoffPerQuery: 100000000000
+        ResultConfiguration:
+          ExpectedBucketOwner: !Sub "${AWS::AccountId}"
+          OutputLocation: !Sub "s3://${S3}/"
+
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseInput:
+        Name: !Sub "database-cloudtrail-${AWS::StackName}"
+
+  Table:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: !Sub "table-cloudtrail-${AWS::StackName}"
+        TableType: "EXTERNAL_TABLE"
+        StorageDescriptor:
+          Columns:
+            - Name: "eventVersion"
+              Type: "string"
+            - Name: "userIdentity"
+              Type: "struct<type:string,principalId:string,arn:string,accountId:string,invokedBy:string,accessKeyId:string,userName:string,sessionContext:struct<attributes:struct<mfaAuthenticated:string,creationDate:string>,sessionIssuer:struct<type:string,principalId:string,arn:string,accountId:string,userName:string>,webIdFederationData:map<string,string>>>"
+            - Name: "eventTime"
+              Type: "string"
+            - Name: "eventSource"
+              Type: "string"
+            - Name: "eventName"
+              Type: "string"
+            - Name: "awsRegion"
+              Type: "string"
+            - Name: "sourceIpAddress"
+              Type: "string"
+            - Name: "userAgent"
+              Type: "string"
+            - Name: "errorCode"
+              Type: "string"
+            - Name: "errorMessage"
+              Type: "string"
+            - Name: "requestParameters"
+              Type: "string"
+            - Name: "responseElements"
+              Type: "string"
+            - Name: "additionalEventData"
+              Type: "string"
+            - Name: "requestId"
+              Type: "string"
+            - Name: "eventId"
+              Type: "string"
+            - Name: "readonly"
+              Type: "string"
+            - Name: "resources"
+              Type: "array<struct<arn:string,accountId:string,type:string>>"
+            - Name: "eventType"
+              Type: "string"
+            - Name: "apiVersion"
+              Type: "string"
+            - Name: "recipientAccountId"
+              Type: "string"
+            - Name: "serviceEventDetails"
+              Type: "string"
+            - Name: "sharedEventID"
+              Type: "string"
+            - Name: "vpcEndpointId"
+              Type: "string"
+            - Name: "tlsDetails"
+              Type: "struct<tlsVersion:string,cipherSuite:string,clientProvidedHostHeader:string>"
+          Location:
+            !Sub
+              - "s3://${S3BucketNameRef}/"
+              - S3BucketNameRef:
+                  Fn::ImportValue:
+                    !Sub "${CloudTrailStackName}-S3BucketName"
+          InputFormat: "com.amazon.emr.cloudtrail.CloudTrailInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+          SerdeInfo:
+            SerializationLibrary: "org.apache.hive.hcatalog.data.JsonSerDe"
+        PartitionKeys:
+          - Name: region
+            Type: string
+          - Name: date
+            Type: string
+        Parameters:
+          "projection.enabled": "true"
+          "projection.date.type": "date"
+          "projection.date.range": "NOW-1YEARS,NOW"
+          "projection.date.format": "yyyy/MM/dd"
+          "projection.date.interval": "1"
+          "projection.date.interval.unit": "DAYS"
+          "projection.region.type": "enum"
+          "projection.region.values": "af-south-1,ap-east-1,ap-northeast-1,ap-northeast-2,ap-northeast-3,ap-south-1,ap-southeast-1,ap-southeast-2,ca-central-1,eu-central-1,eu-north-1,eu-south-1,eu-west-1,eu-west-2,eu-west-3,me-south-1,sa-east-1,us-east-1,us-east-2,us-west-1,us-west-2"
+          "storage.location.template":
+            Fn::Join:
+              - ''
+              - - !Sub
+                    - "s3://${S3BucketNameRef}/AWSLogs/${AWS::AccountId}/CloudTrail"
+                    - S3BucketNameRef:
+                        Fn::ImportValue:
+                          !Sub "${CloudTrailStackName}-S3BucketName"
+                - '/${region}/${date}'
+          "compressionType": "gzip"
+          "typeOfData": "file"
+          "classification": "cloudtrail"
+
+  S3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: "Enabled"
+      IntelligentTieringConfigurations:
+        - Id: "IntelligentTieringConfigurations"
+          Status: "Enabled"
+          Tierings:
+            - Days: 90
+              AccessTier: "ARCHIVE_ACCESS"
+            - Days: 180
+              AccessTier: "DEEP_ARCHIVE_ACCESS"
+
+# To empty the bucket contents and delete S3 when deleting the stack
+# Executed only when the stack is deleted by an if statement
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "DeleteS3ForAthena-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              s3 = boto3.resource('s3')
+              try:
+                  if event['RequestType'] == 'Delete':
+                      bucket = s3.Bucket(event['ResourceProperties']['BucketName'])
+                      bucket.objects.all().delete()
+                      bucket.object_versions.all().delete()
+                      s3.Bucket(event['ResourceProperties']['BucketName']).delete()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print("Error: ", e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  InvokeLambda:
+    Type: Custom::EmptyS3Bucket
+    Properties:
+      ServiceToken: !GetAtt Lambda.Arn
+      BucketName: !Ref S3
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaRoleForAthena-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "LambdaPolicyForAthena-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - logs:*
+                Resource:
+                  - Fn::Sub: ${S3.Arn}
+                  - Fn::Sub: ${S3.Arn}/*

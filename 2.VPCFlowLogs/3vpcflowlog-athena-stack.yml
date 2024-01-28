@@ -1,0 +1,265 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Configure settings to search VPC Flow Logs stored in S3 using Athena.
+
+# The following describes how to use [Parameterized Queries]
+# https://docs.aws.amazon.com/ja_jp/athena/latest/ug/querying-with-prepared-statements.html
+
+# The following is a configuration manual for Athena.
+# https://docs.aws.amazon.com/ja_jp/athena/latest/ug/vpc-flow-logs.html
+
+# Create a stack with the name [vpcflowlog-athena-stack]
+
+# ★Caution
+# The valid columns are up to "log_status", and those from "vpc_id" onwards are invalid.
+
+Parameters:
+  VPCFlowLogS3StackName:
+    Type: String
+    Default: 'vpcflowlog-s3-stack'
+
+
+
+Resources:
+  DataCatalog:
+    Type: AWS::Athena::DataCatalog
+    Properties:
+      Name: !Sub "VPCFlowLog-DataCatalog-${AWS::StackName}"
+      Type: "GLUE"
+      Parameters:
+        catalog-id: !Sub "${AWS::AccountId}"
+
+# The ParameterizedQueries can be checked with the following CLI command.
+# aws athena get-prepared-statement --statement-name example2 --work-group WorkGroup-vpcflowlog-athena-stack | jq -r '{StatementName: .PreparedStatement.StatementName, QueryStatement: .PreparedStatement.QueryStatement, WorkGroupName: .PreparedStatement.WorkGroupName, LastModifiedTime: .PreparedStatement.LastModifiedTime} | .QueryStatement'
+
+# The ParameterizedQueries can be executed with the following SQL.
+# EXECUTE example2 USING 2023,11,23,11
+  ParameterizedQueries:
+    Type: AWS::Athena::PreparedStatement
+    Properties:
+      StatementName: "example2"
+      WorkGroup: !Ref WorkGroup
+      QueryStatement: !Sub |
+        select
+            srcaddr,
+            dstaddr,
+            srcport,
+            dstport,
+            packets,
+            action
+        from "${Table}"
+        WHERE
+        year = ?
+        AND month = ?
+        AND day = ?
+        AND hour = ?
+        LIMIT 10
+
+  WorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "WorkGroup-${AWS::StackName}"
+      RecursiveDeleteOption: True
+      State: "ENABLED"
+      WorkGroupConfiguration:
+        BytesScannedCutoffPerQuery: 100000000000
+        ResultConfiguration:
+          ExpectedBucketOwner: !Sub "${AWS::AccountId}"
+          OutputLocation: !Sub "s3://${S3}/"
+
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseInput:
+        Name: !Sub "database-vpcflowlog-${AWS::StackName}"
+
+  Table:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: !Sub "table-vpcflowlog-${AWS::StackName}"
+        TableType: "EXTERNAL_TABLE"
+        StorageDescriptor:
+          Columns:
+            - Name: version
+              Type: int
+            - Name: account_id
+              Type: string
+            - Name: interface_id
+              Type: string
+            - Name: srcaddr
+              Type: string
+            - Name: dstaddr
+              Type: string
+            - Name: srcport
+              Type: int
+            - Name: dstport
+              Type: int
+            - Name: protocol
+              Type: bigint
+            - Name: packets
+              Type: bigint
+            - Name: bytes
+              Type: bigint
+            - Name: start
+              Type: bigint
+            - Name: end
+              Type: bigint
+            - Name: action
+              Type: string
+            - Name: log_status
+              Type: string
+            - Name: vpc_id
+              Type: string
+            - Name: subnet_id
+              Type: string
+            - Name: instance_id
+              Type: string
+            - Name: tcp_flags
+              Type: int
+            - Name: type
+              Type: string
+            - Name: pkt_srcaddr
+              Type: string
+            - Name: pkt_dstaddr
+              Type: string
+            - Name: az_id
+              Type: string
+            - Name: sublocation_type
+              Type: string
+            - Name: sublocation_id
+              Type: string
+            - Name: pkt_src_aws_service
+              Type: string
+            - Name: pkt_dst_aws_service
+              Type: string
+            - Name: flow_direction
+              Type: string
+            - Name: traffic_path
+              Type: int
+          Location:
+            !Sub
+              - "s3://${S3BucketNameRef}/AWSLogs/aws-account-id=${AWS::AccountId}/aws-service=vpcflowlogs/aws-region=ap-northeast-1/"
+              - S3BucketNameRef:
+                  Fn::ImportValue:
+                    !Sub "${VPCFlowLogS3StackName}-S3BucketName"
+          InputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat'
+          OutputFormat: 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'
+          SerdeInfo:
+            SerializationLibrary: 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe'
+        PartitionKeys:
+          - Name: year
+            Type: int
+          - Name: month
+            Type: int
+          - Name: day
+            Type: int
+          - Name: hour
+            Type: int
+        Parameters:
+          "classification": "parquet"
+          "EXTERNAL": "true"
+          "skip.header.line.count": "1"
+          "projection.enabled": "true"
+          "projection.year.type": "date"
+          "projection.year.format": "yyyy"
+          "projection.year.range": "NOW-1YEARS,NOW"
+          "projection.month.type": "integer"
+          "projection.month.digits": "2"
+          "projection.month.interval": "1"
+          "projection.month.range": "1,12"
+          "projection.day.type": "integer"
+          "projection.day.digits": "2"
+          "projection.day.interval": "1"
+          "projection.day.range": "1,31"
+          "projection.hour.type": "integer"
+          "projection.hour.digits": "2"
+          "projection.hour.interval": "1"
+          "projection.hour.range": "1,24"
+          "storage.location.template":
+            Fn::Join:
+              - ''
+              - - !Sub
+                    - "s3://${S3BucketNameRef}/AWSLogs/aws-account-id=${AWS::AccountId}/aws-service=vpcflowlogs/aws-region=ap-northeast-1"
+                    - S3BucketNameRef:
+                        Fn::ImportValue:
+                          !Sub "${VPCFlowLogS3StackName}-S3BucketName"
+                - '/year=${year}/month=${month}/day=${day}/hour=${hour}'
+
+  S3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: "Enabled"
+      IntelligentTieringConfigurations:
+        - Id: "IntelligentTieringConfigurations"
+          Status: "Enabled"
+          Tierings:
+            - Days: 90
+              AccessTier: "ARCHIVE_ACCESS"
+            - Days: 180
+              AccessTier: "DEEP_ARCHIVE_ACCESS"
+
+# To empty the bucket contents and delete S3 when deleting the stack
+# Executed only when the stack is deleted by an if statement
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "DeleteS3ForAthena-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              s3 = boto3.resource('s3')
+              try:
+                  if event['RequestType'] == 'Delete':
+                      bucket = s3.Bucket(event['ResourceProperties']['BucketName'])
+                      bucket.objects.all().delete()
+                      bucket.object_versions.all().delete()
+                      s3.Bucket(event['ResourceProperties']['BucketName']).delete()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print("Error: ", e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  InvokeLambda:
+    Type: Custom::EmptyS3Bucket
+    Properties:
+      ServiceToken: !GetAtt Lambda.Arn
+      BucketName: !Ref S3
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaRoleForAthena-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "LambdaPolicyForAthena-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - logs:*
+                Resource:
+                  - Fn::Sub: ${S3.Arn}
+                  - Fn::Sub: ${S3.Arn}/*

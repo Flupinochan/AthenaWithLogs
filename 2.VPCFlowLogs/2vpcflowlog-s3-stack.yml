@@ -1,0 +1,168 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Configure VPC Flow Logs and the destination S3.
+
+# The following is a configuration manual for saving VPC Flow Logs to S3.
+# https://docs.aws.amazon.com/ja_jp/vpc/latest/userguide/flow-logs-s3.html
+
+# The following is a configuration manual for Athena.
+# https://docs.aws.amazon.com/ja_jp/athena/latest/ug/vpc-flow-logs.html
+
+# Create a stack with the name [vpcflowlog-s3-stack]
+
+Parameters:
+  VPCID:
+    Type: String
+    Default: 'vpc-xxxxx'
+    AllowedPattern: '^vpc-.+'
+    ConstraintDescription: 'VPC ID must start with "vpc-"'
+
+
+
+Resources:
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    DependsOn: S3BucketPolicy
+    Properties:
+      DestinationOptions:
+        FileFormat: "parquet"
+        HiveCompatiblePartitions: true
+        PerHourPartition: true
+      LogDestination: !GetAtt S3.Arn
+      LogDestinationType: "s3"
+      MaxAggregationInterval: 600
+      ResourceId: !Ref VPCID
+      ResourceType: "VPC"
+      Tags:
+        - Key: "Name"
+          Value: "VPCFlowLog-S3"
+      TrafficType: "ALL"
+
+  S3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: "Enabled"
+      IntelligentTieringConfigurations:
+        - Id: "IntelligentTieringConfigurations"
+          Status: "Enabled"
+          Tierings:
+            - Days: 90
+              AccessTier: "ARCHIVE_ACCESS"
+            - Days: 180
+              AccessTier: "DEEP_ARCHIVE_ACCESS"
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AWSLogDeliveryWrite"
+            Effect: "Allow"
+            Principal:
+              Service: "delivery.logs.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: !Sub "arn:aws:s3:::${S3}/AWSLogs/aws-account-id=${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Sub "${AWS::AccountId}"
+                "s3:x-amz-acl": "bucket-owner-full-control"
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+          - Sid: "AWSLogDeliveryAclCheck"
+            Effect: "Allow"
+            Principal:
+              Service: "delivery.logs.amazonaws.com"
+            Action:
+              - "s3:GetBucketAcl"
+              - "s3:ListBucket"
+            Resource: !Sub "arn:aws:s3:::${S3}"
+            Condition:
+              StringEquals:
+                "aws:SourceAccount": !Sub "${AWS::AccountId}"
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+
+
+# To empty the bucket contents and delete S3 when deleting the stack
+# Executed only when the stack is deleted by an if statement
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "DeleteS3ForCloudTrail-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              s3 = boto3.resource('s3')
+              try:
+                  if event['RequestType'] == 'Delete':
+                      bucket = s3.Bucket(event['ResourceProperties']['BucketName'])
+                      bucket.objects.all().delete()
+                      bucket.object_versions.all().delete()
+                      s3.Bucket(event['ResourceProperties']['BucketName']).delete()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print("Error: ", e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  InvokeLambda:
+    Type: Custom::EmptyS3Bucket
+    Properties:
+      ServiceToken: !GetAtt Lambda.Arn
+      BucketName: !Ref S3
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaRoleForCloudTrail-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "LambdaPolicyForCloudTrail-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - logs:*
+                Resource:
+                  - Fn::Sub: ${S3.Arn}
+                  - Fn::Sub: ${S3.Arn}/*
+
+
+
+
+
+Outputs:
+  S3BucketName:
+    Value: !Ref S3
+    Export:
+      Name: !Sub "${AWS::StackName}-S3BucketName"
+
+  S3Arn:
+    Value: !GetAtt S3.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Arn"
+
+  S3DomainName:
+    Value: !GetAtt S3.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-S3DomainName"

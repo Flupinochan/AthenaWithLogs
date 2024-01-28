@@ -1,0 +1,141 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Create a CloudTrail trail and also create an S3 Bucket for storing the logs.
+
+# To store logs in an S3 Bucket, CloudTrail requires the appropriate bucket policy to be set.
+# https://docs.aws.amazon.com/ja_jp/awscloudtrail/latest/userguide/create-s3-bucket-policy-for-cloudtrail.html
+
+# Create a stack with the name [cloudTrail-stack]
+
+Resources:
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: S3BucketPolicy
+    Properties:
+      TrailName: !Sub "${AWS::StackName}"
+      IncludeGlobalServiceEvents: True
+      IsLogging: True
+      IsMultiRegionTrail: True
+      S3BucketName: !Ref S3
+
+  S3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::AccountId}-${AWS::StackName}"
+      VersioningConfiguration:
+        Status: "Enabled"
+      IntelligentTieringConfigurations:
+        - Id: "IntelligentTieringConfigurations"
+          Status: "Enabled"
+          Tierings:
+            - Days: 90
+              AccessTier: "ARCHIVE_ACCESS"
+            - Days: 180
+              AccessTier: "DEEP_ARCHIVE_ACCESS"
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AWSCloudTrailAclCheck"
+            Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:GetBucketAcl"
+            Resource: !GetAtt S3.Arn
+            Condition:
+              StringEquals:
+                "aws:SourceArn": !Sub "arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}"
+          - Sid: "AWSCloudTrailWrite"
+            Effect: "Allow"
+            Principal:
+              Service: "cloudtrail.amazonaws.com"
+            Action: "s3:PutObject"
+            Resource: !Sub "${S3.Arn}/*"
+            Condition:
+              StringEquals:
+                "s3:x-amz-acl": "bucket-owner-full-control"
+                "aws:SourceArn": !Sub "arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}"
+
+# To empty the bucket contents and delete S3 when deleting the stack
+# Executed only when the stack is deleted by an if statement
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "DeleteS3ForCloudTrail-${AWS::StackName}"
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+              s3 = boto3.resource('s3')
+              try:
+                  if event['RequestType'] == 'Delete':
+                      bucket = s3.Bucket(event['ResourceProperties']['BucketName'])
+                      bucket.objects.all().delete()
+                      bucket.object_versions.all().delete()
+                      s3.Bucket(event['ResourceProperties']['BucketName']).delete()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print("Error: ", e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  InvokeLambda:
+    Type: Custom::EmptyS3Bucket
+    Properties:
+      ServiceToken: !GetAtt Lambda.Arn
+      BucketName: !Ref S3
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaRoleForCloudTrail-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "LambdaPolicyForCloudTrail-${AWS::StackName}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - logs:*
+                Resource:
+                  - Fn::Sub: ${S3.Arn}
+                  - Fn::Sub: ${S3.Arn}/*
+
+
+
+
+
+Outputs:
+  S3BucketName:
+    Value: !Ref S3
+    Export:
+      Name: !Sub "${AWS::StackName}-S3BucketName"
+
+  S3Arn:
+    Value: !GetAtt S3.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-S3Arn"
+
+  S3DomainName:
+    Value: !GetAtt S3.DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-S3DomainName"
