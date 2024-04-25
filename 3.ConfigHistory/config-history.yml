@@ -1,0 +1,77 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  ConfigLocation:
+    Type: String
+    Default: "s3://BucketName/AWSLogs/"
+
+  DatabaseName:
+    Type: String
+    Default: "config_history_database"
+
+  TableName:
+    Type: String
+    Default: "config_history_table"
+
+Resources:
+  Database:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseInput:
+        Name: !Ref DatabaseName
+
+  Table:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Sub "${AWS::AccountId}"
+      DatabaseName: !Ref Database
+      TableInput:
+        Name: !Ref TableName
+        TableType: "EXTERNAL_TABLE"
+        StorageDescriptor:
+          Columns:
+            - Name: "fileversion"
+              Type: "string"
+            - Name: "configSnapshotId"
+              Type: "string"
+            - Name: "configurationitems"
+              Type: "array<struct<configurationitemversion:string,configurationitemcapturetime:string,configurationstateid:bigint,awsaccountid:string,configurationitemstatus:string,resourcetype:string,resourceid:string,resourcename:string,arn:string,awsregion:string,availabilityzone:string,configurationstatemd5hash:string,resourcecreationtime:string>>"
+          Location: !Ref ConfigLocation
+          SerdeInfo:
+            SerializationLibrary: "org.apache.hive.hcatalog.data.JsonSerDe"
+            Parameters:
+              serialization.format: "1"
+          InputFormat: "org.apache.hadoop.mapred.TextInputFormat"
+          OutputFormat: "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat"
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: accountid
+            Type: string
+          - Name: region
+            Type: string
+        Parameters:
+          "projection.enabled": "true"
+          "projection.year.interval": "1"
+          "projection.year.range": "2023,2123"
+          "projection.year.type": "integer"
+          "projection.month.interval": "1"
+          "projection.month.range": "1,12"
+          "projection.month.type": "integer"
+          "projection.day.interval": "1"
+          "projection.day.range": "1,31"
+          "projection.day.type": "integer"
+          "projection.accountid.type": "injected"
+          "projection.region.type": "enum"
+          "projection.region.values": "af-south-1,ap-east-1,ap-northeast-1,ap-northeast-2,ap-northeast-3,ap-south-1,ap-southeast-1,ap-southeast-2,ca-central-1,eu-central-1,eu-north-1,eu-south-1,eu-west-1,eu-west-2,eu-west-3,me-south-1,sa-east-1,us-east-1,us-east-2,us-west-1,us-west-2"
+          "storage.location.template":
+            Fn::Join:
+              - ""
+              - - !Ref ConfigLocation
+                - "/${accountid}/Config/${region}/${year}/${month}/${day}/ConfigHistory/"
